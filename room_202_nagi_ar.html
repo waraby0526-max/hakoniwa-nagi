@@ -2840,17 +2840,34 @@
         renderer.setAnimationLoop(animate);
     };
     // =========================================================================
-    // 11.5 部屋なしモード: 部屋・家具を隠し、影だけを受ける透明な床を置く
+    // 11.5 部屋なしモード: 部屋・家具を隠し、足元に丸影を置く
+    //      (実機のカクつき対策として、リアルタイムシャドウは無効化する)
     // =========================================================================
     roomGroup.visible = false;
-    const shadowCatcher = new THREE.Mesh(
-        new THREE.PlaneGeometry(9, 9),
-        new THREE.ShadowMaterial({ opacity: 0.22 })
+    renderer.shadowMap.enabled = false;
+    sunLight.castShadow = false;
+    const blobCanvas = document.createElement('canvas');
+    blobCanvas.width = 256;
+    blobCanvas.height = 256;
+    const blobCtx = blobCanvas.getContext('2d');
+    const blobGrad = blobCtx.createRadialGradient(128, 128, 8, 128, 128, 128);
+    blobGrad.addColorStop(0, 'rgba(0,0,0,0.5)');
+    blobGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    blobCtx.fillStyle = blobGrad;
+    blobCtx.fillRect(0, 0, 256, 256);
+    const blobShadow = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.15, 1.15),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(blobCanvas), transparent: true, depthWrite: false })
     );
-    shadowCatcher.rotation.x = -Math.PI / 2;
-    shadowCatcher.position.y = 0.002;
-    shadowCatcher.receiveShadow = true;
-    scene.add(shadowCatcher);
+    blobShadow.rotation.x = -Math.PI / 2;
+    blobShadow.position.y = 0.01;
+    blobShadow.renderOrder = 1;
+    // woman.root はGLB有効化時に visible=false になるため子にはできない。
+    // scene に置き、描画直前に woman.root の足元へ追従させる。
+    scene.add(blobShadow);
+    blobShadow.onBeforeRender = () => {
+        blobShadow.position.set(woman.root.position.x, 0.01, woman.root.position.z);
+    };
 
     // =========================================================================
     // 12. WebXR (Quest) 入室: 部屋の入口付近に立って、歩き回る凪を眺める

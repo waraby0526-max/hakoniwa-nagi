@@ -1825,7 +1825,13 @@
             const act = aiState.currentActivity;
             const spot = SPOTS[act.spot];
 
-            let diff = spot.faceY - woman.root.rotation.y;
+            let faceY = spot.faceY;
+            if (act.id === 'attention') {
+                // かまって中はスポットの向きではなくユーザーの方を向く
+                camera.getWorldPosition(_attCamPos);
+                faceY = Math.atan2(_attCamPos.x - woman.root.position.x, _attCamPos.z - woman.root.position.z);
+            }
+            let diff = faceY - woman.root.rotation.y;
             while (diff > Math.PI) diff -= Math.PI * 2;
             while (diff < -Math.PI) diff += Math.PI * 2;
             woman.root.rotation.y += diff * Math.min(1, dt * 6);
@@ -2877,17 +2883,110 @@
     }
 
     // =========================================================================
-    // 11.5 部屋なしモード: 部屋・家具を隠し、影だけを受ける透明な床を置く
+    // 11.5 部屋なしモード: 部屋・家具を隠し、足元に丸影を置く
+    //      (実機のカクつき対策として、リアルタイムシャドウは無効化する)
     // =========================================================================
     roomGroup.visible = false;
-    const shadowCatcher = new THREE.Mesh(
-        new THREE.PlaneGeometry(9, 9),
-        new THREE.ShadowMaterial({ opacity: 0.22 })
+    renderer.shadowMap.enabled = false;
+    sunLight.castShadow = false;
+    const blobCanvas = document.createElement('canvas');
+    blobCanvas.width = 256;
+    blobCanvas.height = 256;
+    const blobCtx = blobCanvas.getContext('2d');
+    const blobGrad = blobCtx.createRadialGradient(128, 128, 8, 128, 128, 128);
+    blobGrad.addColorStop(0, 'rgba(0,0,0,0.5)');
+    blobGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    blobCtx.fillStyle = blobGrad;
+    blobCtx.fillRect(0, 0, 256, 256);
+    const blobShadow = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.15, 1.15),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(blobCanvas), transparent: true, depthWrite: false })
     );
-    shadowCatcher.rotation.x = -Math.PI / 2;
-    shadowCatcher.position.y = 0.002;
-    shadowCatcher.receiveShadow = true;
-    scene.add(shadowCatcher);
+    blobShadow.rotation.x = -Math.PI / 2;
+    blobShadow.position.y = 0.01;
+    blobShadow.renderOrder = 1;
+    // woman.root はGLB有効化時に visible=false になるため子にはできない。
+    // scene に置き、描画直前に woman.root の足元へ追従させる。
+    scene.add(blobShadow);
+    blobShadow.onBeforeRender = () => {
+        blobShadow.position.set(woman.root.position.x, 0.01, woman.root.position.z);
+    };
+
+    // =========================================================================
+    // 11.45 かまってモード: たまにユーザーの正面まで歩いてきて、
+    //        こちらを向いて Presentation モーションでかまってアピールする
+    // =========================================================================
+    const attentionState = {
+        nextAt: performance.now() + (30 + Math.random() * 25) * 1000, // 初回は30〜55秒後
+        active: false
+    };
+    const ATTENTION_THOUGHTS = ['ねえねえ、見て見て。', 'あ、こっち来ちゃった。', 'たまにはかまってほしいな。', '（あなたの近くまで来た）'];
+    const _attCamPos = new THREE.Vector3();
+
+    function startAttention() {
+        camera.getWorldPosition(_attCamPos);
+        const ux = _attCamPos.x, uz = _attCamPos.z;
+        const wx = woman.root.position.x, wz = woman.root.position.z;
+        let dx = wx - ux, dz = wz - uz;
+        let dist = Math.hypot(dx, dz);
+        if (dist < 0.001) { dx = 0; dz = 1; dist = 1; }
+        // ユーザーの正面 約1.15m の点 (散歩範囲にクランプ)
+        const tx = Math.max(-2.3, Math.min(2.3, ux + (dx / dist) * 1.15));
+        const tz = Math.max(-2.3, Math.min(2.3, uz + (dz / dist) * 1.15));
+        aiState.currentActivity = {
+            id: 'attention',
+            title: 'かまってほしいな',
+            spot: 'center',
+            duration: 7,
+            pose: 'idle',
+            motionName: 'Presentation',
+            thoughts: ATTENTION_THOUGHTS.slice(),
+            effects: { thirst: 0, relax: 6, curiosity: 8, energy: 1 }
+        };
+        aiState.thoughtText = ATTENTION_THOUGHTS[Math.floor(Math.random() * ATTENTION_THOUGHTS.length)];
+        aiState.actionTimer = 0;
+        if (dist > 1.5) {
+            aiState.waypoints = [{ x: tx, z: tz }];
+            aiState.phase = 'walking';
+        } else {
+            aiState.waypoints = [];
+            aiState.phase = 'acting';
+        }
+        attentionState.active = true;
+        updateHUD();
+    }
+
+    setInterval(() => {
+        const now = performance.now();
+        const act = aiState.currentActivity;
+        if (attentionState.active) {
+            if (!act || act.id !== 'attention') {
+                // 挨拶終了 → 次回を 75〜140 秒後に再設定
+                attentionState.active = false;
+                attentionState.nextAt = now + (75 + Math.random() * 65) * 1000;
+                return;
+            }
+            if (aiState.phase === 'acting') {
+                // 挨拶中はユーザーの方を向き続ける
+                camera.getWorldPosition(_attCamPos);
+                const targetAngle = Math.atan2(_attCamPos.x - woman.root.position.x, _attCamPos.z - woman.root.position.z);
+                let diff = targetAngle - woman.root.rotation.y;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                woman.root.rotation.y += diff * 0.35;
+            }
+            return;
+        }
+        if (now < attentionState.nextAt) return;
+        if (!nagiState.active || !nagiState.motionActions) return;
+        if (aiState.phase !== 'acting') return;      // 歩行中は見送る
+        if (act && act.motionName) return;           // モーション再生中は見送る
+        if (!nagiState.motionActions['Presentation']) return;
+        startAttention();
+    }, 120);
+
+    // テスト用フック: 次回のかまってを即時発動させる
+    window.__nagiAttentionNow = () => { attentionState.nextAt = 0; };
 
     // =========================================================================
     // 12. WebXR (Quest) 入室: 部屋の入口付近に立って、歩き回る凪を眺める
